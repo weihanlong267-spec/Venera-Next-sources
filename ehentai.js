@@ -7,7 +7,7 @@ class Ehentai extends ComicSource {
     // unique id of the source
     key = "ehentai"
 
-    version = "1.2.0"
+    version = "1.2.1"
 
     minAppVersion = "1.5.3"
 
@@ -110,43 +110,148 @@ class Ehentai extends ComicSource {
              * @returns {Promise<boolean>}
              */
             validate: async (values) => {
-                if (values.length !== 4) {
-                    return false
-                }
-                if (values[0].length === 0 || values[1].length === 0) {
-                    return false
-                }
-                let cookies = []
-                for (let i = 0; i < values.length; i++) {
-                    cookies.push(new Cookie({
-                        name: this.account.loginWithCookies.fields[i],
-                        value: values[i],
-                        domain: ".e-hentai.org"
-                    }))
-                    cookies.push(new Cookie({
-                        name: this.account.loginWithCookies.fields[i],
-                        value: values[i],
-                        domain: ".exhentai.org"
-                    }))
-                }
-                Network.deleteCookies('https://e-hentai.org')
-                Network.setCookies('https://e-hentai.org', cookies)
-                let res = await Network.get(
-                    "https://forums.e-hentai.org/",
-                    {
-                        "referer": "https://forums.e-hentai.org/index.php?",
-                        "accept":
-                            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                        "accept-encoding": "gzip, deflate, br",
-                        "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7"
+                let cookiesMap = {};
+                let rawInputs = values.filter(v => v && String(v).trim().length > 0).join(" ");
+
+                // 1. 优先尝试 JSON 解析
+                try {
+                    let parsedJson = JSON.parse(rawInputs);
+                    if (Array.isArray(parsedJson)) {
+                        parsedJson.forEach(item => {
+                            if (item && item.name && item.value) {
+                                cookiesMap[String(item.name).trim().toLowerCase()] = String(item.value).trim();
+                            }
+                        });
+                    } else if (typeof parsedJson === 'object' && parsedJson !== null) {
+                        Object.keys(parsedJson).forEach(k => {
+                            cookiesMap[String(k).trim().toLowerCase()] = String(parsedJson[k]).trim();
+                        });
+                    }
+                } catch (e) {
+                    // 2. 关键词锚点边界解析引擎
+                    const targetKeys = ['ipb_member_id', 'ipb_pass_hash', 'igneous', 'star'];
+                    targetKeys.forEach(key => {
+                        let otherKeys = targetKeys.filter(k => k !== key).join('|');
+                        let pattern = new RegExp(
+                            key + '\\s*[:=]\\s*(?:["\']([^"\']*)["\']|([^\\r\\n;,]+?))(?=\\s*(?:' + otherKeys + ')\\s*[:=]|\\s*[;,\\r\\n]|$)',
+                            'i'
+                        );
+                        let match = rawInputs.match(pattern);
+                        if (match) {
+                            let val = (match[1] || match[2] || '').trim();
+                            if (val) {
+                                cookiesMap[key] = val;
+                            }
+                        }
                     });
-                if (res.status !== 200) {
-                    return false
                 }
-                let document = new HtmlDocument(res.body)
-                let name = document.querySelector("div#userlinks > p.home > b > a");
-                document.dispose()
-                return name != null
+
+                // 3. 最终参数确认
+                let memberId = cookiesMap['ipb_member_id'] || (values[0] && !values[0].includes(':') && !values[0].includes('=') ? values[0].trim() : '');
+                let passHash = cookiesMap['ipb_pass_hash'] || (values[1] && !values[1].includes(':') && !values[1].includes('=') ? values[1].trim() : '');
+                let igneous = cookiesMap['igneous'] || (values[2] && !values[2].includes(':') && !values[2].includes('=') ? values[2].trim() : '');
+                let star = cookiesMap['star'] || (values[3] && !values[3].includes(':') && !values[3].includes('=') ? values[3].trim() : '');
+
+                // console.log(`关键词锚点解析调试 -> memberId: ${memberId}, passHash: ${passHash}, igneous: ${igneous}, star: ${star}`);
+
+                if (!memberId || !passHash) {
+                    UI.showMessage(`解析失败：未检测到有效的 ipb_member_id 或 ipb_pass_hash`);
+                    UI.showMessage(`本页输入框均可解析cookies或包含的字段/JSON等等`);
+                    return false;
+                }
+
+                const applyCookiesAndLogin = () => {
+                    let targetFields = [
+                        { name: "ipb_member_id", val: memberId },
+                        { name: "ipb_pass_hash", val: passHash },
+                        { name: "igneous", val: igneous },
+                        { name: "star", val: star }
+                    ];
+
+                    let cookies = [];
+                    targetFields.forEach(item => {
+                        if (!item.val) return;
+                        cookies.push(new Cookie({ name: item.name, value: item.val, domain: ".e-hentai.org" }));
+                        cookies.push(new Cookie({ name: item.name, value: item.val, domain: ".exhentai.org" }));
+                        cookies.push(new Cookie({ name: item.name, value: item.val, domain: ".forums.e-hentai.org" }));
+                    });
+
+                    Network.deleteCookies('https://e-hentai.org');
+                    Network.deleteCookies('https://exhentai.org');
+                    Network.deleteCookies('https://forums.e-hentai.org');
+
+                    Network.setCookies('https://e-hentai.org', cookies);
+                    Network.setCookies('https://exhentai.org', cookies);
+                    Network.setCookies('https://forums.e-hentai.org', cookies);
+                };
+
+                return new Promise((resolve) => {
+                    let isResolved = false;
+
+                    const safeResolve = (val) => {
+                        if (!isResolved) {
+                            isResolved = true;
+                            resolve(val);
+                        }
+                    };
+
+                    // 完整展示所有提取到的值，严格采用指定格式
+                    let displayDetails = [
+                        `ipb_member_id："${memberId}"`,
+                        `ipb_pass_hash："${passHash}"`,
+                        `igneous："${igneous}"`,
+                        `star："${star}"`
+                    ].join('\n');
+
+                    UI.showDialog(
+                        "Cookie 登录确认",
+                        `已成功解析参数：\n${displayDetails}\n\n验证可能会触发 Cloudflare 保护，请选择处理方式：`,
+                        [
+                            {
+                                text: "直接信任",
+                                callback: () => {
+                                    applyCookiesAndLogin();
+                                    UI.showMessage("已采用直接信任模式登录");
+                                    safeResolve(true);
+                                }
+                            },
+                            {
+                                text: "尝试验证",
+                                callback: () => {
+                                    applyCookiesAndLogin();
+                                    (async () => {
+                                        try {
+                                            let res = await Network.get("https://forums.e-hentai.org/", {
+                                                "referer": "https://forums.e-hentai.org/index.php?",
+                                                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                                            });
+                                            if (res.status !== 200) {
+                                                UI.showMessage("验证失败：服务器状态码异常");
+                                                safeResolve(false);
+                                                return;
+                                            }
+                                            let document = new HtmlDocument(res.body);
+                                            let userlinks = document.querySelector("div#userlinks");
+                                            let isLogged = userlinks != null && res.body.includes("act=Login&CODE=03");
+                                            document.dispose();
+
+                                            if (isLogged) {
+                                                UI.showMessage("联网验证成功！");
+                                                safeResolve(true);
+                                            } else {
+                                                UI.showMessage("验证失败：Cookies 无效或未登录");
+                                                safeResolve(false);
+                                            }
+                                        } catch (e) {
+                                            UI.showMessage("验证失败：可能是 Cloudflare 拦截");
+                                            safeResolve(false);
+                                        }
+                                    })();
+                                }
+                            }
+                        ]
+                    );
+                });
             }
         },
 
